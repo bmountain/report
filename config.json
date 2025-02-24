@@ -1,0 +1,40 @@
+{
+    "dailynote_dir": "C:\\Users\\bmountain\\vault\\daily",
+    "force_tag_inheritance": false,
+    "parent_tag": {
+        "pa": {
+            "name": "プロジェクトA", 
+            "id": 1
+        },
+        "pb": {
+            "name": "プロジェクトB",
+            "id": 2
+        }
+    },
+    "child_tag": {
+        "it": {
+            "name": "結合試験",
+            "id": 1
+        },
+        "ut": {
+            "name": "単体試験",
+            "id": 2
+        },
+        "debug": {
+            "name": "コード修正",
+            "id": 3
+        },
+        "code": {
+            "name": "製造",
+            "id": 4
+        }
+    },
+    "parent_default_tag": {
+        "name": "その他",
+        "id": 100
+    },
+    "child_default_tag": {
+        "name": "その他",
+        "id": 100
+    }
+}
