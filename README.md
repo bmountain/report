@@ -1,2 +1,5 @@
 Obsidian でデイリーノートに作成したタスクリストを整形する
-ほとんど意味ないかも
+
+```bash
+ python report.py |iconv -t CP932 |clip
+```

@@ -2,11 +2,21 @@
 Obsidianのデイリーノートを読み込み整形されたタスクリストをターミナルに表示する
 """
 
+from __future__ import annotations
+
+import io
+import sys
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import datetime
 import json
 import re
+import sys
+from datetime import date
+from enum import Enum, auto
 from pathlib import Path
 
+import pandas as pd
 from pydantic import BaseModel, Field
 
 
@@ -21,11 +31,6 @@ class Tag(BaseModel):
 
 class Config(BaseModel):
     dailynote_dir: str = Field(min_length=1)
-    force_tag_inheritance: bool
-    parent_tag: dict[str, Tag]
-    child_tag: dict[str, Tag]
-    parent_default_tag: Tag
-    child_default_tag: Tag
 
 
 def load_config() -> Config:
@@ -36,7 +41,10 @@ def load_config() -> Config:
 
 
 def get_task_lines() -> list[str]:
-    """今日の日付のデイリーノートを読み込み整形前のタスクリストを返す"""
+    """
+    今日の日付のデイリーノートを読み込み整形前のタスクリストを返す
+    タスクとして数えるのはインデントが高々1の行のみ。
+    """
     config = load_config()
     dailynote_dir = Path(config.dailynote_dir)
     filename = datetime.datetime.now().strftime("%Y-%m-%d") + ".md"
@@ -48,7 +56,39 @@ def get_task_lines() -> list[str]:
     except:
         raise NotFoundException()
 
-    return [line for line in lines if re.fullmatch(r"^\t*- \[.\] .*\n?$", line)]
+    return [line for line in lines if re.fullmatch(r"^\t{,1}- \[.\] .*\n?$", line)]
+
+
+class State(Enum):
+    TODO = auto()
+    ONGOING = auto()
+    DONE = auto()
+
+
+def get_state_str(state: State) -> str:
+    if state == State.TODO:
+        return "未着手"
+    elif state == State.ONGOING:
+        return "作業中"
+    elif state == State.DONE:
+        return "完了"
+    else:
+        raise Exception()
+
+
+class Task:
+    def __init__(
+        self,
+        title: str,
+        state: State,
+        start: date | None = None,
+        done: date | None = None,
+    ) -> None:
+        self.title: str = title
+        self.state: State = state
+        self.start: date | None = start
+        self.done: date | None = done
+        self.children: list[Task] = []
 
 
 def count_tabs(line: str) -> int:
@@ -60,104 +100,97 @@ def count_tabs(line: str) -> int:
     return n
 
 
-def get_tag(line: str) -> tuple[str, str]:
-    """タグをサーチ・パースして親タグ、子タグのペアを返す。該当するタグがなければ空文字列を返す"""
-    pattern = r"#([^\s/]*)/?(\S*)?"
-    res = re.search(pattern, line)
-    if res is None:
-        return "", ""
-    tags = res.groups()
-    p_tag = tags[0] if tags[0] else ""
-    c_tag = tags[1] if tags[1] else ""
-    return p_tag, c_tag
+def parse_line(line: str) -> tuple[Task, bool]:
+    """
+    タスク一行を読み取りそのtitle, start, doneを返す。
+    さらにそれが親タスクか返す
+    title: タスク内容
+    start: 開始日
+    done: 終了日
+    """
+    line = re.sub(r"#\S*", "", line).rstrip()
+    is_parent = True if count_tabs(line) == 0 else False
+
+    # 日付取得
+    start_pattern = r"🛫\s+?((\d{4}\-)?(\d{2}\-\d{2}))"
+    done_pattern = r"✅\s+?((\d{4}\-)?(\d{2}\-\d{2}))"
+    start_match = re.findall(start_pattern, line)
+    start = start_match[0][-1] if start_match else None
+    done_match = re.findall(done_pattern, line)
+    done = done_match[0][-1] if done_match else None
+    start = get_date(start)
+    done = get_date(done)
+
+    state_pattern = r"\t{,1}\- \[(.)\] "
+    state_char = re.search(state_pattern, line).groups()[0]
+    state: State
+    if state_char == " ":
+        state = State.TODO
+    elif state_char == "/":
+        state = State.ONGOING
+    elif state_char == "x":
+        state = State.DONE
+    else:
+        print("state_char:", state_char)
+        raise Exception()
+    title = re.sub(
+        "|".join([start_pattern, done_pattern, state_pattern]), "", line
+    ).strip()
+    return Task(title, state, start, done), is_parent
 
 
-class Task(BaseModel):
-    content: str
-    parent_tag: str
-    child_tag: str
-
-
-def format_line(line: str) -> str:
-    """タグを除去"""
-    return re.sub(r"#\S*", "", line).rstrip()
+def get_date(s: str | None) -> date | None:
+    """今日以前のMM-DDの形式をdateにして返す"""
+    if s is None:
+        return None
+    month, day = map(int, s.split("-"))
+    today = date.today()
+    year = today.year
+    if date(year, month, day) <= today:
+        return date(year, month, day)
+    else:
+        return date(year - 1, month, day)
 
 
 def format_tasks(task_lines: list[str]) -> list[Task]:
     """複数行にわたるタスクを整形する"""
     task_list: list[Task] = []
     while task_lines:
-        parent_tag, child_tag = get_tag(task_lines[0])
-        i = 0
-        while (
-            (len(task_lines) > 1)
-            and (i < len(task_lines) - 1)
-            and (count_tabs(task_lines[i + 1]) > 0)
-        ):
-            i += 1
-        content = "\n".join([format_line(line) for line in task_lines[: i + 1]])
-        task_list.append(
-            Task(
-                **{"content": content, "parent_tag": parent_tag, "child_tag": child_tag}
-            )
-        )
-        task_lines = task_lines[i + 1 :]
-
-    config = load_config()
-    task_list.sort(key=lambda task: get_id(task.child_tag, config, False))
-    task_list.sort(key=lambda task: get_id(task.parent_tag, config, True))
-
-    i = 0
-    while i < len(task_list) - 1:
-        task, task_n = task_list[i], task_list[i + 1]
-        if (task.parent_tag, task.child_tag) != (task_n.parent_tag, task_n.child_tag):
-            i += 1
+        task, is_parent = parse_line(task_lines[0])
+        if is_parent:
+            task_list.append(task)
         else:
-            task_m = Task(
-                **{
-                    "content": "\n".join([task.content, task_n.content]),
-                    "parent_tag": task.parent_tag,
-                    "child_tag": task.child_tag,
-                }
-            )
-            del task_list[i : i + 2]
-            task_list.insert(i, task_m)
+            task_list[-1].children.append(task)
+        task_lines = task_lines[1:]
     return task_list
 
 
-def get_id(tag: str, config: Config, parent: bool = True) -> int:
-    """タグ名からIDを取得"""
-    if parent:
-        tag_set = config.parent_tag
-        default_tag = config.parent_default_tag
-    else:
-        tag_set = config.child_tag
-        default_tag = config.child_default_tag
-    if tag not in tag_set.keys():
-        return default_tag.id
-    else:
-        return tag_set[tag].id
-
-
-def get_name(tag: str, config: Config, parent: bool = True) -> str:
-    """タグ名から分類名を取得"""
-    if parent:
-        tag_set = config.parent_tag
-        default_tag = config.parent_default_tag
-    else:
-        tag_set = config.child_tag
-        default_tag = config.child_default_tag
-    if tag not in tag_set.keys():
-        return default_tag.name
-    else:
-        return tag_set[tag].name
+def get_table(task: Task) -> tuple[str, date | None, date | None, str]:
+    """タスクを読み込んでその情報とサブタスクの表（md形式）を返す。"""
+    title, start, done = task.title, task.start, task.done
+    df = pd.DataFrame(
+        [
+            (subtask.title, get_state_str(subtask.state), subtask.start, subtask.done)
+            for subtask in task.children
+        ],
+        columns=["作業", "状態", "開始", "終了"],
+    )
+    df_md = df.to_markdown(index=False)
+    return title, start, done, df_md
 
 
 def main() -> None:
     task_lines = get_task_lines()
     tasks = format_tasks(task_lines)
-    for task in tasks:
-        print(task.content, end="\n\n")
+    res = ""
+    for i, task in enumerate(tasks):
+        title, start, done, md = get_table(task)
+        header = title + f" {get_state_str(task.state)} 開始：{start} 終了：{done}"
+        res += "\n".join([header, md])
+        if i < len(tasks) - 1:
+            res += "\n-----\n"
+
+    print(res)
 
 
 if __name__ == "__main__":
