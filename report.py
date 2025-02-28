@@ -4,49 +4,42 @@ Obsidianのデイリーノートを読み込み整形されたタスクリスト
 
 from __future__ import annotations
 
-import io
-import sys
-
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import datetime
 import json
 import re
-import sys
 from datetime import date
-from enum import Enum, auto
 from pathlib import Path
 
 import pandas as pd
-from pydantic import BaseModel, Field
+
+from datemodel import Columns, Config, State, StateStr, Task
 
 
-class NotFoundException(Exception):
-    pass
-
-
-class Tag(BaseModel):
-    name: str = Field(min_length=1)
-    id: int
-
-
-class Config(BaseModel):
-    dailynote_dir: str = Field(min_length=1)
-
-
-def load_config() -> Config:
+def load_config() -> tuple[
+    Path,
+    StateStr,
+    Columns,
+    str,
+    str,
+]:
     """設定を読み込む"""
     with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
-    return Config(**config)
+    config = Config(**config)
+    return (
+        Path(config.dailynote_dir),
+        config.state_str,
+        config.columns,
+        config.header,
+        config.footer,
+    )
 
 
-def get_task_lines() -> list[str]:
+def get_task_lines(dailynote_dir: Path) -> list[str]:
     """
     今日の日付のデイリーノートを読み込み整形前のタスクリストを返す
     タスクとして数えるのはインデントが高々1の行のみ。
     """
-    config = load_config()
-    dailynote_dir = Path(config.dailynote_dir)
     filename = datetime.datetime.now().strftime("%Y-%m-%d") + ".md"
     note_path = Path(dailynote_dir) / Path(filename)
 
@@ -54,41 +47,22 @@ def get_task_lines() -> list[str]:
         with open(note_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except:
-        raise NotFoundException()
+        raise Exception("Task list not found")
 
-    return [line for line in lines if re.fullmatch(r"^\t{,1}- \[.\] .*\n?$", line)]
-
-
-class State(Enum):
-    TODO = auto()
-    ONGOING = auto()
-    DONE = auto()
-
-
-def get_state_str(state: State) -> str:
-    if state == State.TODO:
-        return "未着手"
-    elif state == State.ONGOING:
-        return "作業中"
-    elif state == State.DONE:
-        return "完了"
-    else:
-        raise Exception()
+    # チェックリスト形式の行一覧をタグを消して返す
+    return [
+        re.sub(r"#\S*", "", line).rstrip()
+        for line in lines
+        if re.fullmatch(r"^\t{,1}- \[.\] .*\n?$", line)
+    ]
 
 
-class Task:
-    def __init__(
-        self,
-        title: str,
-        state: State,
-        start: date | None = None,
-        done: date | None = None,
-    ) -> None:
-        self.title: str = title
-        self.state: State = state
-        self.start: date | None = start
-        self.done: date | None = done
-        self.children: list[Task] = []
+class StateWriter:
+    def __init__(self, state_str: dict[State, str]) -> None:
+        self.state_str = state_str
+
+    def write_state(self, state: State) -> str:
+        return self.state_str[state]
 
 
 def count_tabs(line: str) -> int:
@@ -108,46 +82,50 @@ def parse_line(line: str) -> tuple[Task, bool]:
     start: 開始日
     done: 終了日
     """
-    line = re.sub(r"#\S*", "", line).rstrip()
     is_parent = True if count_tabs(line) == 0 else False
 
     # 日付取得
     start_pattern = r"🛫\s+?((\d{4}\-)?(\d{2}\-\d{2}))"
-    done_pattern = r"✅\s+?((\d{4}\-)?(\d{2}\-\d{2}))"
     start_match = re.findall(start_pattern, line)
     start = start_match[0][-1] if start_match else None
+    start_date = get_date(start)
+
+    done_pattern = r"✅\s+?((\d{4}\-)?(\d{2}\-\d{2}))"
     done_match = re.findall(done_pattern, line)
     done = done_match[0][-1] if done_match else None
-    start = get_date(start)
-    done = get_date(done)
+    done_date = get_date(done)
 
+    #  作業状態取得
     state_pattern = r"\t{,1}\- \[(.)\] "
-    state_char = re.search(state_pattern, line).groups()[0]
-    state: State
-    if state_char == " ":
-        state = State.TODO
-    elif state_char == "/":
-        state = State.ONGOING
-    elif state_char == "x":
-        state = State.DONE
-    else:
-        print("state_char:", state_char)
-        raise Exception()
+    if m := re.search(state_pattern, line):
+        state_char = m.groups()[0]
+
+    match state_char:
+        case " ":
+            state = State.TODO
+        case "/":
+            state = State.ONGOING
+        case "x":
+            state = State.DONE
+        case "-":
+            state = State.CANCELLED
+        case _:
+            raise Exception(f"Invalid state character: {state_char}")
     title = re.sub(
         "|".join([start_pattern, done_pattern, state_pattern]), "", line
     ).strip()
-    return Task(title, state, start, done), is_parent
+    return Task(title, state, start_date, done_date), is_parent
 
 
 def get_date(s: str | None) -> date | None:
-    """今日以前のMM-DDの形式をdateにして返す"""
+    """今日以前の(YYYY)-MM-DDの形式をdateにして返す"""
     if s is None:
         return None
-    month, day = map(int, s.split("-"))
+    *_, month, day = map(int, s.split("-"))
     today = date.today()
     year = today.year
-    if date(year, month, day) <= today:
-        return date(year, month, day)
+    if (d := date(year, month, day)) <= today:
+        return d
     else:
         return date(year - 1, month, day)
 
@@ -161,36 +139,64 @@ def format_tasks(task_lines: list[str]) -> list[Task]:
             task_list.append(task)
         else:
             task_list[-1].children.append(task)
-        task_lines = task_lines[1:]
+        del task_lines[0]
     return task_list
 
 
-def get_table(task: Task) -> tuple[str, date | None, date | None, str]:
-    """タスクを読み込んでその情報とサブタスクの表（md形式）を返す。"""
-    title, start, done = task.title, task.start, task.done
-    df = pd.DataFrame(
-        [
-            (subtask.title, get_state_str(subtask.state), subtask.start, subtask.done)
-            for subtask in task.children
-        ],
-        columns=["作業", "状態", "開始", "終了"],
-    )
-    df_md = df.to_markdown(index=False)
-    return title, start, done, df_md
+class TableWriter:
+    def __init__(self, state_str: StateStr, columns: Columns) -> None:
+        self.columns = columns
+        self.state_dict = {
+            State.TODO: state_str.todo,
+            State.ONGOING: state_str.ongoing,
+            State.DONE: state_str.done,
+            State.CANCELLED: state_str.cancelled,
+        }
+
+    def write_table(self, task: Task) -> str:
+        rows = []
+        for subtask in task.children:
+            subtitle = subtask.title
+            substate_str = self.state_dict[subtask.state]
+            if sd := subtask.start_date:
+                substart_date = sd.strftime("%m/%d")
+            else:
+                substart_date = ""
+            if dd := subtask.done_date:
+                subdone_date = dd.strftime("%m/%d")
+            else:
+                subdone_date = ""
+            subtask_data = [subtitle, substate_str, substart_date, subdone_date]
+            if subtask.state == State.CANCELLED:
+                subtask_data = ["~~" + d + "~~" if d else "" for d in subtask_data]
+            elif date.today() in {subtask.start_date, subtask.done_date}:
+                subtask_data = ["**" + d + "**" if d else "" for d in subtask_data]
+            rows.append(tuple(subtask_data))
+        md_df = pd.DataFrame(
+            rows,
+            columns=[
+                self.columns.title,
+                self.columns.state,
+                self.columns.start_date,
+                self.columns.done_date,
+            ],
+        ).to_markdown(index=False)
+
+        fmtdate = lambda d: d.strftime("%m/%d") if d else ""
+        sdate_str, ddate_str = map(fmtdate, [task.start_date, task.done_date])
+        table_header = "   ".join(
+            [task.title, self.state_dict[task.state], sdate_str + "~" + ddate_str]
+        )
+        return table_header + "\n\n" + md_df
 
 
 def main() -> None:
-    task_lines = get_task_lines()
+    dailynote_dir, state_str, columns, header, footer = load_config()
+    task_lines = get_task_lines(dailynote_dir)
     tasks = format_tasks(task_lines)
-    res = ""
-    for i, task in enumerate(tasks):
-        title, start, done, md = get_table(task)
-        header = title + f" {get_state_str(task.state)} 開始：{start} 終了：{done}"
-        res += "\n".join([header, md])
-        if i < len(tasks) - 1:
-            res += "\n-----\n"
-
-    print(res)
+    tw = TableWriter(state_str, columns)
+    contents = "\n\n-----\n\n".join([tw.write_table(task) for task in tasks])
+    print("\n\n".join([header, contents, footer]))
 
 
 if __name__ == "__main__":

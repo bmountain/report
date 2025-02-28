@@ -1,3 +1,17 @@
 {
-    "dailynote_dir": "C:\\Users\\bmountain\\vault\\daily"
+    "dailynote_dir": "C:\\Users\\bmountain\\vault\\daily",
+    "header": "### 計画内の作業",
+    "footer": "### 翌営業日の作業予定",
+    "state_str": {
+        "todo": "未着手",
+        "ongoing": "作業中",
+        "done": "完了",
+        "cancelled": "取消"
+    },
+    "columns": {
+        "title": "作業",
+        "state": "状態",
+        "start_date": "開始",
+        "done_date": "終了"
+    }
 }
